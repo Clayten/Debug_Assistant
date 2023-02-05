@@ -1,6 +1,6 @@
 #!/usr/bin/env ruby
 
-%w(exception test_a test_b test_c).each {|fn| load File.join(File.dirname(__FILE__), "#{fn}.rb") }
+%w(exception ai test_a test_b test_c).each {|fn| load File.join(File.dirname(__FILE__), "#{fn}.rb") }
 
 # Test Classes and Modules to display the source code from in the context of an exception
 module Debugger
@@ -15,12 +15,14 @@ module Debugger
     end
   end
 
+  def self.debug_msg e
+    e.filtered_problem.lines.reject {|l| l.strip == '^' }.join
+  end
+
   def self.check
-    $c = $e = nil
     C.c
   rescue StandardError, SystemStackError => e
     puts "Rescue: #{e.inspect}\n"
-    $e = e
     e
   end
 end
