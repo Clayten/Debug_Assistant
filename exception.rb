@@ -5,69 +5,136 @@
 #
 
 module ExceptionBinding
-  attr_reader :call_binding
-
-  def local_variables
-    eval "local_variables.map {|v| [v, eval(v.to_s)] }", call_binding if call_binding
+  def filtered_files
+    %w[\.rubies \.gem (pry)] + [__FILE__.gsub('/','\/')]
   end
 
-  def object
-    p :object
-    eval('self', call_binding) if call_binding
+  def file_filter
+    /#{filtered_files.join('|')}/
   end
 
-  def method
-    p :method
-    p backtrace
-    error_line = backtrace.first
-    error_line_num = error_line.scan(/\d+/).first.to_i
-    last_line = error_line
+  def filtered_backtrace
+    (backtrace || []).reject {|bt| bt =~ file_filter }
+  end
 
-    backtrace.each {|btl|
-      btln = btl.scan(/\d+/).first.to_i
-      p [:btl, btl, :btln, btln]
-      break if btln != error_line_num
-      last_line = btl
+  def filtered_caller
+    caller[1..-1].reject {|bt| bt =~ file_filter }
+  end
+
+  def call_history
+    backtrace || caller[2..-1]
+  end
+
+  def filtered_call_history
+    call_history.reject {|bt| bt =~ file_filter }
+  end
+
+  def backtrace_sites
+    bts = {}
+    filtered_call_history.map {|line|
+      file, line, method_id = line.split(':')
+      method = method_id.scan(/`([^']+)'/).first.first
+      [file, line, method]
+      bts[[file, line]] = method
     }
-    p [:ll, last_line]
-    last_line.scan(/`([^'])'/).first.first
+    bts
   end
 
-  def method_code
-    p [:slf, self.class]
-    method_type = object.is_a?(Module) ? '.' : '#'
-    [object, method_type, method].join
+  def lvs bind
+    eval "local_variables.map {|v| [v, eval(v.to_s)] }", bind
+  end
+
+  def bindings ; @bindings ||= Hash.new {|h,k| h[k] = [] } end
+
+  def methods
+    bs = bindings.values.inject(&:+).map(&:last)
+    ms = Hash[bs.map {|b| m = Pry::Method.from_binding b ; [m.source_location, m]}].values
+  end
+
+  def methods_by_file
+    methods.inject(Hash.new {|h,k| h[k] = [] }) {|h,m| h[m.source_file] << m ; h }
   end
 
   def context
+    methods_by_file.map {|file, methods|
+      receiver = nil
+      source = methods.
+        sort_by {|method| method.source_location }.
+        map {|pry_method|
+          suffix = prefix = nil
+          method = pry_method.wrapped
+          if receiver != method.receiver
+            klass = method.receiver.class
+            close_if_needed = ['end',''] unless receiver.nil?
+            prefix = "#{klass.to_s.downcase} #{method.receiver}"
+            receiver = method.receiver
+          end
+          code = Pry::Code.from_method method
+          $s = source = code.with_line_numbers.to_s
+          [close_if_needed, prefix, source.rstrip].flatten.compact
+        }
+      suffix_if_needed = 'end' if receiver
+      [file, source.flatten, suffix_if_needed].compact.join("\n")
+    }.join("\n\n")
+    # $c = cs = ms.map {|m| Pry::Code.from_method m }
+  end
+
+  def filtered_full_message
+    msg = full_message.
+      lines.
+      reject {|l| l =~ file_filter }.
+      reject {|l| l.strip.empty? }
+    no_ansi = msg.join.gsub(/\e\[\d+(;\d+)?./,'')
+  end
+
+  def common_dir_prefix_removal files
+    file_parts = files.map {|file| file.split('/').reject(&:empty?) }
+    shortest = file_parts.map(&:length).min
+    common = shortest.times.find {|n| file_parts.map {|parts| parts[n] }.uniq.length != 1 }
+    file_parts.map {|parts| File.join *parts[common - 1 .. -1] }
+  end
+
+  def problem
+    filtered_full_message + "\n" + context
+  end
+
+  def filtered_problem
+    shortened_filenames = common_dir_prefix_removal methods_by_file.keys
+    file_translation = Hash[methods_by_file.keys.zip(shortened_filenames)]
+    file_translation.inject(problem) {|pr, (f, sf)| pr.gsub(f, sf) }
+  end
+
+  def call_sites
+    Hash[bindings.map {|k,a| [k,a.sort_by {|_,l,_| l }.first] }]
   end
 
   def initialize *a
-    # p [:E_init!, *a]
+    # p [:E_init_start, self.class, *a]
     super *a
-    # Find the calling location
-    $c = caller
-    expected_file, expected_line = caller(1).first.split(':')[0,2]
-    expected_line = expected_line.to_i
-    # p [:E_init, :expected, "#{expected_file}:#{expected_line}"]
-    return_count = 5  # If we see more than 5 returns, stop tracing
-    $lw = line_window = (expected_line - 5 .. expected_line)
+
+    $c = filtered_caller
+
+    return_count = 2  # When to stop tracing
+
+    $s = sites = backtrace_sites
+    $f = files = sites.map {|(f,l),b| f }.uniq
 
     # Start tracing until we see our caller.
     set_trace_func(proc do |event, file, line, id, binding, kls|
-      p [:E_init, :stf, :e, event, "#{file}:#{line}", kls, id, :b, binding] if binding
+      # p [:E_init, :tf, [:e, event, :f, "#{file}:#{line}", :k, kls.inspect[0...40], :i, id, :b, !!binding]] if binding && files.include?(file)
 
-      if file == expected_file && line_window.include?(line)
-        p [:E_init, :stf, :match, :b, binding] if binding
-        @call_binding = binding
-        set_trace_func(nil) if binding
+      if binding && files.include?(file)
+        # p [:E_init, :tf, :match, :b, binding] # if binding
+        bindings[[kls, id]] << [file, line, binding]
+        # set_trace_func(nil) if binding
       end
 
       if event == :return
-        # p [:E_init, :stf, :give_up]
+        p [:E_init, :tf, :quit_check, :return_count_remaining, return_count]
         set_trace_func(nil) if (return_count -= 1) <= 0
       end
     end)
+    # set_trace_func(nil)
     # p [:E_init, :stf, :done]
   end
 end
