@@ -35,28 +35,33 @@ module ExceptionBinding
       file, line, method_id = line.split(':')
       method = method_id.scan(/`([^']+)'/).first.first
       [file, line, method]
-      bts[[file, line]] = method
+      bts[[file, line.to_i]] = method
     }
     bts
   end
 
-  def lvs bind
-    eval "local_variables.map {|v| [v, eval(v.to_s)] }", bind
-  end
+  def bindings_by_file ; @bindings_by_file ||= Hash.new {|h,k| h[k] = [] } end
 
-  def bindings ; @bindings ||= Hash.new {|h,k| h[k] = [] } end
+  def bindings ; bindings_by_file.values.inject(&:+).map(&:last) end
 
   def methods
-    bs = bindings.values.inject(&:+).map(&:last)
-    ms = Hash[bs.map {|b| m = Pry::Method.from_binding b ; [m.source_location, m]}].values
+    Hash[bindings.map {|b| m = Pry::Method.from_binding b ; [m.source_location, m]}].values
   end
 
-  def methods_by_file
-    methods.inject(Hash.new {|h,k| h[k] = [] }) {|h,m| h[m.source_file] << m ; h }
+  def called_methods_by_file
+    lines_with_backtraces = backtrace_sites.inject(Hash.new {|h,k| h[k] = [] }) {|h,((f,l),m)| h[f] << l ; h }
+    methods_by_file = methods.inject(Hash.new {|h,k| h[k] = [] }) {|h,m| h[m.source_file] << m ; h }
+    Hash[methods_by_file.map {|f,ms|
+      fms = ms.select {|m|
+        sr = m.source_range
+        lines_with_backtraces[f].any? {|ln| sr.include? ln }
+      }
+      [f, fms]
+    }]
   end
 
   def context
-    methods_by_file.map {|file, methods|
+    called_methods_by_file.map {|file, methods|
       receiver = nil
       source = methods.
         sort_by {|method| method.source_location }.
@@ -70,13 +75,12 @@ module ExceptionBinding
             receiver = method.receiver
           end
           code = Pry::Code.from_method method
-          $s = source = code.with_line_numbers.to_s
-          [close_if_needed, prefix, source.rstrip].flatten.compact
+          source = code.with_line_numbers.to_s.rstrip.gsub(/^\s*(\d+):/) {|n| '% 4s' % n.strip }
+          [close_if_needed, prefix, source, ''].flatten.compact
         }
       suffix_if_needed = 'end' if receiver
       [file, source.flatten, suffix_if_needed].compact.join("\n")
-    }.join("\n\n")
-    # $c = cs = ms.map {|m| Pry::Code.from_method m }
+    }.join("\n\n").gsub(/(\d+:.*end\n)\nend/) {|s| s.gsub("\n\n", "\n") }
   end
 
   def filtered_full_message
@@ -84,7 +88,7 @@ module ExceptionBinding
       lines.
       reject {|l| l =~ file_filter }.
       reject {|l| l.strip.empty? }
-    no_ansi = msg.join.gsub(/\e\[\d+(;\d+)?./,'')
+    no_ansi = msg.join.gsub(/\e\[(\d+(;\d+)?)?./,'')
   end
 
   def common_dir_prefix_removal files
@@ -99,13 +103,9 @@ module ExceptionBinding
   end
 
   def filtered_problem
-    shortened_filenames = common_dir_prefix_removal methods_by_file.keys
-    file_translation = Hash[methods_by_file.keys.zip(shortened_filenames)]
+    method_files = methods.map(&:source_file).uniq
+    file_translation = Hash[method_files.zip(common_dir_prefix_removal method_files)]
     file_translation.inject(problem) {|pr, (f, sf)| pr.gsub(f, sf) }
-  end
-
-  def call_sites
-    Hash[bindings.map {|k,a| [k,a.sort_by {|_,l,_| l }.first] }]
   end
 
   def initialize *a
@@ -125,7 +125,7 @@ module ExceptionBinding
 
       if binding && files.include?(file)
         # p [:E_init, :tf, :match, :b, binding] # if binding
-        bindings[[kls, id]] << [file, line, binding]
+        bindings_by_file[[kls, id]] << [file, line, binding]
         # set_trace_func(nil) if binding
       end
 
