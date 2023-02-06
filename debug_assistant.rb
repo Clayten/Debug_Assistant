@@ -1,5 +1,7 @@
 #!/usr/bin/env ruby
 
+load '~/dev/openai/openai.rb'
+
 %w(exception ai test_a test_b test_c).each {|fn| load File.join(File.dirname(__FILE__), "#{fn}.rb") }
 
 # Test Classes and Modules to display the source code from in the context of an exception
@@ -13,10 +15,6 @@ module Debugger
         c_orig
       end
     end
-  end
-
-  def self.debug_msg e
-    e.filtered_problem.lines.reject {|l| l.strip == '^' }.join
   end
 
   def self.check

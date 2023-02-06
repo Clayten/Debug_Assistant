@@ -5,7 +5,6 @@ module Debugger
     end
 
     def self.b2
-      $pb = binding
       A.a
     end
   end
