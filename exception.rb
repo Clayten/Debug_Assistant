@@ -6,7 +6,7 @@
 
 module ExceptionBinding
   def filtered_files
-    %w[\.rubies \.gem (pry)] + [__FILE__.gsub('/','\/')]
+    %w[\.rubies \.gem (pry)]
   end
 
   def file_filter
@@ -22,7 +22,9 @@ module ExceptionBinding
   end
 
   def call_history
-    backtrace || caller[2..-1]
+    # backtrace || caller[2..-1]
+    stop_trace if backtrace
+    (backtrace && !backtrace.empty?) ? filtered_backtrace : filtered_caller
   end
 
   def filtered_call_history
@@ -44,27 +46,36 @@ module ExceptionBinding
 
   def bindings ; bindings_by_file.values.inject(&:+).map(&:last) end
 
-  def methods
+  def methods_from_bindings
     Hash[bindings.map {|b| m = Pry::Method.from_binding b ; [m.source_location, m]}].values
   end
 
   def called_methods_by_file
     lines_with_backtraces = backtrace_sites.inject(Hash.new {|h,k| h[k] = [] }) {|h,((f,l),m)| h[f] << l ; h }
-    methods_by_file = methods.inject(Hash.new {|h,k| h[k] = [] }) {|h,m| h[m.source_file] << m ; h }
-    Hash[methods_by_file.map {|f,ms|
-      fms = ms.select {|m|
-        sr = m.source_range
-        lines_with_backtraces[f].any? {|ln| sr.include? ln }
-      }
-      [f, fms]
-    }]
+    methods_by_file = methods_from_bindings.inject(Hash.new {|h,k| h[k] = [] }) {|h,m| h[m.source_file] << m ; h }
+    Hash[methods_by_file.map {|file, methods|
+      sorted_methods = methods.
+        select {|method|
+          sr = method.source_range
+          lines_with_backtraces[file].any? {|ln| sr.include? ln }
+        }.
+        sort_by {|method| method.source_location }
+      next if sorted_methods.empty?
+      [ file, sorted_methods ]
+    }.compact]
   end
 
-  def context
-    called_methods_by_file.map {|file, methods|
+  def files_from_bindings ; called_methods_by_file.keys end
+
+  def filter_common_filename_elements text, filenames = files_from_bindings
+    file_translation = Hash[filenames.zip(common_dir_prefix_removal filenames)]
+    file_translation.inject(text) {|t, (f, sf)| t.gsub(f, sf) }
+  end
+
+  def code_context
+    context = called_methods_by_file.map {|file, methods|
       receiver = nil
       source = methods.
-        sort_by {|method| method.source_location }.
         map {|pry_method|
           suffix = prefix = nil
           method = pry_method.wrapped
@@ -81,61 +92,82 @@ module ExceptionBinding
       suffix_if_needed = 'end' if receiver
       [file, source.flatten, suffix_if_needed].compact.join("\n")
     }.join("\n\n").gsub(/(\d+:.*end\n)\nend/) {|s| s.gsub("\n\n", "\n") }
+    filter_common_filename_elements context
   end
 
+  def strip_ansi txt ; txt.dup.gsub(/\e\[(\d+(;\d+)?)?./,'') end
+
   def filtered_full_message
-    msg = full_message.
-      lines.
+    msg = strip_ansi(full_message)
+    lines = msg.lines
+    msg = [lines.first] +
+      lines[1..-1].
       reject {|l| l =~ file_filter }.
+      reject {|l| l =~ /^\s*\^+$/ }.
       reject {|l| l.strip.empty? }
-    no_ansi = msg.join.gsub(/\e\[(\d+(;\d+)?)?./,'')
+    filter_common_filename_elements msg.join
   end
 
   def common_dir_prefix_removal files
     file_parts = files.map {|file| file.split('/').reject(&:empty?) }
+    return file_parts.first.last(2).join('/') if files.length == 1
     shortest = file_parts.map(&:length).min
     common = shortest.times.find {|n| file_parts.map {|parts| parts[n] }.uniq.length != 1 }
-    file_parts.map {|parts| File.join *parts[common - 1 .. -1] }
+    start = common.zero? ? 0 : common - 1
+    file_parts.map {|parts| File.join *parts[start .. -1] }
   end
 
   def problem
-    filtered_full_message + "\n" + context
+    filtered_full_message + "\n" + code_context
   end
 
-  def filtered_problem
-    method_files = methods.map(&:source_file).uniq
-    file_translation = Hash[method_files.zip(common_dir_prefix_removal method_files)]
-    file_translation.inject(problem) {|pr, (f, sf)| pr.gsub(f, sf) }
+  def local_vars_at_exception
+    f,l = backtrace_sites.keys.first
+    b = bindings_by_file.values.inject(&:+).find {|bf, bl, b| bf == f && bl == l }.last
+    eval "local_variables.map {|v| p [:v, v] ; [v, eval(v.to_s)] }", b
   end
+
+  def custom_types_at_exception
+    local_vars_at_exception.
+      map {|n,v| m = v.is_a?(Module) ? v : v.class }.
+      reject {|m| m == NilClass }.
+      map {|m|
+        output = StringIO.new
+        Pry.run_command("$ #{m} -al", show_output: true, output: output)
+        output.rewind
+        output.read
+      }
+
+  end
+
+  def stop_trace ; set_trace_func nil end
 
   def initialize *a
-    # p [:E_init_start, self.class, *a]
-    super *a
-
-    $c = filtered_caller
+    p [:E_init_start, self.class, *a]
+    super
 
     return_count = 2  # When to stop tracing
 
-    $s = sites = backtrace_sites
-    $f = files = sites.map {|(f,l),b| f }.uniq
+    sites = backtrace_sites
+    files = sites.map {|(f,l),b| f }.uniq
 
     # Start tracing until we see our caller.
     set_trace_func(proc do |event, file, line, id, binding, kls|
-      # p [:E_init, :tf, [:e, event, :f, "#{file}:#{line}", :k, kls.inspect[0...40], :i, id, :b, !!binding]] if binding && files.include?(file)
+      p [:E_init, :tf, [:e, event, :f, "#{file}:#{line}", :k, kls.inspect[0...40], :i, id, :b, !!binding]] if binding && files.include?(file)
 
       if binding && files.include?(file)
         # p [:E_init, :tf, :match, :b, binding] # if binding
-        bindings_by_file[[kls, id]] << [file, line, binding]
-        # set_trace_func(nil) if binding
+        bindings_by_file[[kls, id, line]] << [file, line, binding]
+        # stop_trace if binding
       end
 
       if event == :return
         p [:E_init, :tf, :quit_check, :return_count_remaining, return_count]
-        set_trace_func(nil) if (return_count -= 1) <= 0
+        stop_trace if (return_count -= 1) <= 0
       end
     end)
-    # set_trace_func(nil)
-    # p [:E_init, :stf, :done]
+    # stop_trace
+    p [:E_init, :stf, :done]
   end
 end
 class StandardError < Exception ; include ExceptionBinding end
