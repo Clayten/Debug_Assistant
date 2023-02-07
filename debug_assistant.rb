@@ -1,8 +1,6 @@
 #!/usr/bin/env ruby
 
-load '~/dev/openai/openai.rb'
-
-%w(exception ai test_a test_b test_c).each {|fn| load File.join(File.dirname(__FILE__), "#{fn}.rb") }
+%w(proxy exception ai test_a test_b test_c).each {|fn| load File.join(File.dirname(__FILE__), "#{fn}.rb") }
 
 # Test Classes and Modules to display the source code from in the context of an exception
 module Debugger
