@@ -9,11 +9,17 @@ module Debugger
   end
 
   module A
-    def self.a
-      a = 'cat'
+    def self.a arg
+      blk = a_block
       b = Point.new 0,1,2
-      s = a + b
+      s = blk[arg,b]
       puts s
+    end
+
+    def self.a_block
+      lambda {|x,y|
+        x + y
+      }
     end
   end
 end

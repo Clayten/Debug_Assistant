@@ -5,7 +5,7 @@ module Debugger
     end
 
     def self.b2
-      A.a
+      A.a 'cat'
     end
   end
 end
