@@ -1,5 +1,7 @@
 #!/usr/bin/env ruby
 
+require 'pry'
+
 %w(proxy exception ai test_a test_b test_c).each {|fn| load File.join(File.dirname(__FILE__), "#{fn}.rb") }
 
 # Test Classes and Modules to display the source code from in the context of an exception
@@ -21,4 +23,12 @@ module Debugger
     puts "Rescue: #{e.inspect}\n"
     e
   end
+
+  def self.cli
+    e = check
+    puts e.bindings
+    binding.pry
+  end
 end
+
+Debugger.cli if __FILE__ == $0
