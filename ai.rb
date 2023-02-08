@@ -1,5 +1,6 @@
-module Debugger
+load '~/dev/openai/openai.rb'
 
+module Debugger
   def self.prompt_persona
     <<~PROMPT
     You are a skilled #{RUBY_ENGINE} developer acting in a senior mentor role.
@@ -18,7 +19,6 @@ module Debugger
     An EXCEPTION is formatted as follows
       BACKTRACE_ENTRY_1: MESSAGE (TYPE)
         FAILING_CODE
-          BACKTRACE_ENTRY_1
           BACKTRACE_ENTRY_2
           BACKTRACE_ENTRY_N
     PROMPT
