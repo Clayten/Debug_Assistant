@@ -2,7 +2,8 @@
 #
 # https://stackoverflow.com/questions/7647103/can-i-access-the-binding-at-the-moment-of-an-exception-in-ruby
 # https://stackoverflow.com/questions/106920/how-can-i-get-source-and-variable-values-in-ruby-tracebacks
-#
+
+require 'binding_of_caller'
 
 module ExceptionBinding
   def filtered_files
@@ -11,91 +12,110 @@ module ExceptionBinding
 
   def file_filter
     /#{filtered_files.join('|')}/
+    # /^XYZ$/
   end
 
-  def filtered_backtrace
-    (backtrace || []).reject {|bt| bt =~ file_filter }
-  end
-
-  def filtered_caller
-    caller[1..-1].reject {|bt| bt =~ file_filter }
-  end
+  def has_backtrace? ; backtrace && !backtrace.empty? end
 
   def call_history
-    # backtrace || caller[2..-1]
-    stop_trace if backtrace
-    (backtrace && !backtrace.empty?) ? filtered_backtrace : filtered_caller
+    backtrace
   end
 
   def filtered_call_history
     call_history.reject {|bt| bt =~ file_filter }
   end
 
-  def backtrace_sites
-    bts = {}
-    filtered_call_history.map {|line|
-      file, line, method_id = line.split(':')
-      method = method_id.scan(/`([^']+)'/).first.first
-      [file, line, method]
-      bts[[file, line.to_i]] = method
-    }
-    bts
+  def parse_backtrace_line bt
+    file, line, method_id = bt.split(':')
+    method_name = method_id.scan(/`([^']+)'/).first.first
+    [file, line, method_name]
   end
-
-  def bindings_by_file ; @bindings_by_file ||= Hash.new {|h,k| h[k] = [] } end
-
-  def bindings ; bindings_by_file.values.inject(&:+).map(&:last) end
 
   def methods_from_bindings
-    Hash[bindings.map {|b| m = Pry::Method.from_binding b ; [m.source_location, m]}].values
+    bindings.map {|b| Pry::Method.from_binding b }
   end
 
-  def called_methods_by_file
-    lines_with_backtraces = backtrace_sites.inject(Hash.new {|h,k| h[k] = [] }) {|h,((f,l),m)| h[f] << l ; h }
-    methods_by_file = methods_from_bindings.inject(Hash.new {|h,k| h[k] = [] }) {|h,m| h[m.source_file] << m ; h }
-    Hash[methods_by_file.map {|file, methods|
-      sorted_methods = methods.
-        select {|method|
-          sr = method.source_range
-          lines_with_backtraces[file].any? {|ln| sr.include? ln }
-        }.
-        sort_by {|method| method.source_location }
-      next if sorted_methods.empty?
-      [ file, sorted_methods ]
-    }.compact]
-  end
-
-  def files_from_bindings ; called_methods_by_file.keys end
+  def files_from_bindings ; bindings.map {|c| f,l = c.source_location rescue [:unknown_file, 0] ; f } end
 
   def filter_common_filename_elements text, filenames = files_from_bindings
-    file_translation = Hash[filenames.zip(common_dir_prefix_removal filenames)]
-    file_translation.inject(text) {|t, (f, sf)| t.gsub(f, sf) }
+    short_names = common_dir_prefix_removal filenames
+    file_translation = Hash[filenames.zip(short_names)]
+    file_translation.inject(text) {|t, (n, sn)| t.gsub(n, sn) }
   end
 
-  def code_context
+  def sites
+    return to_enum :sites unless block_given?
+    bindings.length.times {|i|
+      b = bindings[i]
+      m = Pry::Method.from_binding b rescue nil
+      c = Pry::Code.from_method m rescue nil
+      yield b,m,c
+    }
+  end
+
+  def code_context_by_stack filter: true
+    callers = binding.frame_count.times.map {|n| binding.of_caller n }[1..-1].map(&:iseq)
+    out = []
+    bindings.each {|binding|
+      method = Pry::Method.from_binding binding
+      code   = Pry::Code.from_method    method  rescue nil if method
+
+      receiver = binding.receiver
+      bf, bl = binding.source_location rescue nil
+      mf, ml =  method.source_location rescue nil
+      sr = method.source_range rescue nil
+      lvs = local_variables_at binding
+
+      raise "Invalid lines #{ml} #{bl} #{sr}" if sr && !sr.include?(ml || bl)
+
+      next if mf && mf =~ file_filter if filter # skip library files, etc
+
+      out << "#{receiver.class} #{receiver}"
+      source = (code.with_line_numbers.with_marker(bl).to_s if code) || (method.source rescue nil)
+      out << "#{source}end" if source && !source.empty?
+      unless lvs.empty?
+      out << "Local Variables:"
+      lvs.each {|k,v| out << "#{'%20s' % k}: #{v.inspect[0...40]}" }
+      end
+      out << "--------"
+      break if callers.include? binding.iseq if filter # break once we get up above the user's code
+    }
+    out.join("\n")
+  end
+
+  # In file and line order, not by stack depth
+  def code_context_by_file
+    called_methods_by_file = Hash.new {|h,k| h[k] = Set.new }
+    bindings.each {|b|
+      f, _ = b.source_location
+      m = Pry::Method.from_binding b
+      called_methods_by_file[f] << m if m
+    }
     context = called_methods_by_file.map {|file, methods|
+      next if file =~ file_filter
       receiver = nil
+      methods = methods.to_a.sort_by! {|m| m.source_line rescue 0 }
       source = methods.
-        map {|pry_method|
+        map {|method|
           suffix = prefix = nil
-          method = pry_method.wrapped
+          wrapped_method = method.wrapped
           if receiver != method.receiver
             klass = method.receiver.class
             close_if_needed = ['end',''] unless receiver.nil?
             prefix = "#{klass.to_s.downcase} #{method.receiver}"
             receiver = method.receiver
           end
-          code = Pry::Code.from_method method
+          code = Pry::Code.from_method(method) rescue (next p [:NoCode!])
           source = code.with_line_numbers.to_s.rstrip.gsub(/^\s*(\d+):/) {|n| '% 4s' % n.strip }
           [close_if_needed, prefix, source, ''].flatten.compact
         }
       suffix_if_needed = 'end' if receiver
       [file, source.flatten, suffix_if_needed].compact.join("\n")
-    }.join("\n\n").gsub(/(\d+:.*end\n)\nend/) {|s| s.gsub("\n\n", "\n") }
+    }.compact.join("\n\n").gsub(/(\d+:.*end\n)\nend/) {|s| s.gsub("\n\n", "\n") }
     filter_common_filename_elements context
   end
 
-  def strip_ansi txt ; txt.dup.gsub(/\e\[(\d+(;\d+)?)?./,'') end
+  def strip_ansi txt ; txt.dup.gsub(/\e\[(\d+(;\d+(;\d+)?)?)?./,'') end
 
   def filtered_full_message
     msg = strip_ansi(full_message)
@@ -110,7 +130,7 @@ module ExceptionBinding
 
   def common_dir_prefix_removal files
     file_parts = files.map {|file| file.split('/').reject(&:empty?) }
-    return file_parts.first.last(2).join('/') if files.length == 1
+    return [file_parts.first.last(2).join('/')] if files.length == 1
     shortest = file_parts.map(&:length).min
     common = shortest.times.find {|n| file_parts.map {|parts| parts[n] }.uniq.length != 1 }
     start = common.zero? ? 0 : common - 1
@@ -118,14 +138,14 @@ module ExceptionBinding
   end
 
   def problem
-    filtered_full_message + "\n" + code_context
+    filtered_full_message + "\n" + code_context_by_stack
   end
 
-  def local_vars_at_exception
-    f,l = backtrace_sites.keys.first
-    b = bindings_by_file.values.inject(&:+).find {|bf, bl, b| bf == f && bl == l }.last
-    eval "local_variables.map {|v| p [:v, v] ; [v, eval(v.to_s)] }", b
+  def local_variables_at b
+    Hash[eval("local_variables.map {|v| [v, eval(v.to_s)] }", b)]
   end
+
+  def local_vars_at_exception ; local_variables_at bindings.first end
 
   def custom_types_at_exception
     local_vars_at_exception.
@@ -137,37 +157,12 @@ module ExceptionBinding
         output.rewind
         output.read
       }
-
   end
 
-  def stop_trace ; set_trace_func nil end
-
+  attr_reader :bindings
   def initialize *a
-    p [:E_init_start, self.class, *a]
     super
-
-    return_count = 2  # When to stop tracing
-
-    sites = backtrace_sites
-    files = sites.map {|(f,l),b| f }.uniq
-
-    # Start tracing until we see our caller.
-    set_trace_func(proc do |event, file, line, id, binding, kls|
-      p [:E_init, :tf, [:e, event, :f, "#{file}:#{line}", :k, kls.inspect[0...40], :i, id, :b, !!binding]] if binding && files.include?(file)
-
-      if binding && files.include?(file)
-        # p [:E_init, :tf, :match, :b, binding] # if binding
-        bindings_by_file[[kls, id, line]] << [file, line, binding]
-        # stop_trace if binding
-      end
-
-      if event == :return
-        p [:E_init, :tf, :quit_check, :return_count_remaining, return_count]
-        stop_trace if (return_count -= 1) <= 0
-      end
-    end)
-    # stop_trace
-    p [:E_init, :stf, :done]
+    @bindings = binding.callers[1..-1]
   end
 end
 class StandardError < Exception ; include ExceptionBinding end
