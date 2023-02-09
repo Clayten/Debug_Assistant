@@ -11,8 +11,8 @@ module Debugger
   module A
     def self.a arg
       blk = a_block
-      b = Point.new 0,1,2
-      s = blk[arg,b]
+      obj = Point.new 0,1,2
+      s = blk[arg,obj]
       puts s
     end
 

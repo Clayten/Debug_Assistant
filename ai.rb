@@ -26,7 +26,7 @@ module Debugger
 
   def self.prompt_parse_exception
     <<~PROMPT
-    Parse the following EXCEPTION and fix the error in the code:
+    Read the following EXCEPTION and fix the error in the code:
     PROMPT
   end
 
@@ -36,6 +36,15 @@ module Debugger
     LINE_NO_1: def METHOD_NAME optional(parameter definition)
     LINE_NO_2:  LINE_OF_CODE
     LINE_NO_N: end
+    PROMPT
+  end
+
+  def self.prompt_code_by_stack_frame
+    <<~PROMPT
+    Code blocks are listed in the order of the stack trace, backwards.
+    A code block consists of a class or module name, then an optional code block and and optional listing of local variables.
+    The code is listed with line numbers, with a "rocket" symbol => indicating what line is being executed.
+    Local variables are displayed in a list of NAME: VALUE pairs
     PROMPT
   end
 
@@ -69,15 +78,23 @@ module Debugger
 
   def self.prompt_parse_code
     <<~PROMPT
-    Parse the following SNIPPET:
+    Read the following code and prepare to answer question about it.
     PROMPT
   end
 
   def self.ai_question e
+    # msg = [ prompt_persona,
+    #         prompt_snippet,
+    #         prompt_parse_code,
+    #         e.code_context, # .lines[0...9].join,
+    #         prompt_exception,
+    #         prompt_parse_exception,
+    #         e.filtered_full_message,
+    # ].join("\n")
     msg = [ prompt_persona,
-            prompt_snippet,
             prompt_parse_code,
-            e.code_context, # .lines[0...9].join,
+            prompt_code_by_stack_frame,
+            e.code_context_by_stack(depth: 2),
             prompt_exception,
             prompt_parse_exception,
             e.filtered_full_message,
