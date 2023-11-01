@@ -1,5 +1,3 @@
-load '~/dev/openai/openai.rb'
-
 module Debugger
   def self.prompt_persona
     <<~PROMPT

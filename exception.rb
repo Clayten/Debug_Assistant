@@ -6,6 +6,14 @@
 require 'binding_of_caller'
 
 module ExceptionBinding
+
+  module BindingExtension
+    refine Binding do
+      attr_reader :iseq
+    end
+  end
+  using BindingExtension
+
   def filtered_files
     %w[\.rubies \.gem (pry)]
   end
@@ -53,12 +61,14 @@ module ExceptionBinding
     }
   end
 
-  def code_context_by_stack filter: true
+  def code_context_by_stack filter: true, depth: nil
     callers = binding.frame_count.times.map {|n| binding.of_caller n }[1..-1].map(&:iseq)
     out = []
     bindings.each {|binding|
       method = Pry::Method.from_binding binding
       code   = Pry::Code.from_method    method  rescue nil if method
+      code   = Pry::Code.from_method    binding rescue nil unless code
+      code   = method.source                    rescue nil unless code
 
       receiver = binding.receiver
       bf, bl = binding.source_location rescue nil
@@ -68,10 +78,12 @@ module ExceptionBinding
 
       raise "Invalid lines #{ml} #{bl} #{sr}" if sr && !sr.include?(ml || bl)
 
-      next if mf && mf =~ file_filter if filter # skip library files, etc
+      p [:mf, mf]
+      next p [:skip, mf] if mf && mf =~ file_filter if filter # skip library files, etc
 
+      out << "#{mf || bf}"
       out << "#{receiver.class} #{receiver}"
-      source = (code.with_line_numbers.with_marker(bl).to_s if code) || (method.source rescue nil)
+      source = code.with_line_numbers.with_marker(bl).to_s if code
       out << "#{source}end" if source && !source.empty?
       unless lvs.empty?
       out << "Local Variables:"
@@ -79,6 +91,10 @@ module ExceptionBinding
       end
       out << "--------"
       break if callers.include? binding.iseq if filter # break once we get up above the user's code
+      if depth
+        depth = depth - 1
+        break if depth.zero?
+      end
     }
     out.join("\n")
   end
@@ -141,8 +157,9 @@ module ExceptionBinding
     filtered_full_message + "\n" + code_context_by_stack
   end
 
+  def local_variable_filter ; /(^_|pry_instance)/ end
   def local_variables_at b
-    Hash[eval("local_variables.map {|v| [v, eval(v.to_s)] }", b)]
+    Hash[b.local_variables.map {|k| v = b.local_variable_get k ; next if k =~ local_variable_filter ; [k,v]}.compact]
   end
 
   def local_vars_at_exception ; local_variables_at bindings.first end
@@ -152,19 +169,37 @@ module ExceptionBinding
       map {|n,v| m = v.is_a?(Module) ? v : v.class }.
       reject {|m| m == NilClass }.
       map {|m|
-        output = StringIO.new
-        Pry.run_command("$ #{m} -al", show_output: true, output: output)
-        output.rewind
-        output.read
-      }
+        next unless c = Pry::Code.from_module(m) rescue nil
+        c.with_line_numbers
+      }.compact.map(&:to_s)
   end
 
   attr_reader :bindings
-  def initialize *a
-    super
-    @bindings = binding.callers[1..-1]
-  end
-end
-class StandardError < Exception ; include ExceptionBinding end
-class SystemStackError < Exception ; include ExceptionBinding end
+  # def initialize *a
+  #   @foo = 42
+  #   p [:init, self.class, a]
+  #   super
+  #   @bindings = binding.callers[1..-1]
+  # end
 
+  def set_callers bnds ; @bindings = bnds end
+end
+#class StandardError < Exception ; include ExceptionBinding end
+#class NoMethodError < NameError ; include ExceptionBinding end
+class Exception
+
+  include ExceptionBinding
+
+  def self.enable_debugging
+    @tp ||= TracePoint.new(:raise) {|tp|
+      $e = e = tp.raised_exception
+      e.set_callers binding.callers[1..-1]
+    }
+    @tp.enable 
+  end
+  def self.disable_debugging
+    @tp.disable if @tp
+    @tp = nil
+  end
+  def self.tp ; @tp end
+end

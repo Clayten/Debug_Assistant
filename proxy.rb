@@ -1,6 +1,4 @@
 class Proxy
-  def self.wrap_stringio ; new StringIO.new end
-
   def _dup
     d = _orig_dup
     @log = @log.dup
@@ -24,22 +22,24 @@ class Proxy
     true
   end
 
-  private
-  def self.safe_methods ; [:method_missing] end
-  def self.undef_methods
-    instance_methods.each {|im|
-      next if safe_methods.include?(im)
-      next if im =~ /^_/
-      orig_name = "_orig_#{im}"
-      if !instance_methods.include?(orig_name)
-        if im !~ /[<>]|==|===|!~|!=/
-          # p [:alias_method, orig_name, im]
-          eval "alias _orig_#{im} #{im}"
+  class << self
+    private
+    def safe_methods ; [:method_missing, :object_id] end
+    def undef_methods
+      instance_methods.each {|im|
+        next if safe_methods.include?(im)
+        next if im =~ /^_/
+        orig_name = "_orig_#{im}"
+        if !instance_methods.include?(orig_name)
+          if im !~ /[<>]|==|===|!~|!=/
+            # p [:alias_method, orig_name, im]
+            eval "alias _orig_#{im} #{im}"
+          end
         end
-      end
-      # p [:undef_method, im]
-      undef_method im
-    }
+        # p [:undef_method, im]
+        undef_method im
+      }
+    end
   end
 
   undef_methods
